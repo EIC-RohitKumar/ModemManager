@@ -1754,7 +1754,7 @@ disconnect_3gpp (MMBroadbandBearer *self,
         mm_base_modem_at_command_full (ctx->modem,
                                        ctx->primary,
                                        ctx->cgact_command,
-                                       10,
+                                       45,
                                        FALSE,
                                        FALSE, /* raw */
                                        NULL, /* cancellable */
@@ -1773,7 +1773,7 @@ disconnect_3gpp (MMBroadbandBearer *self,
         mm_base_modem_at_command_full (ctx->modem,
                                        ctx->secondary,
                                        ctx->cgact_command,
-                                       10,
+                                       45,
                                        FALSE,
                                        FALSE, /* raw */
                                        NULL, /* cancellable */
