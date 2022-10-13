@@ -498,10 +498,10 @@ authenticate_3gpp (GTask *task)
         mm_obj_dbg (self, "using automatic authentication method");
         if (self->priv->allowed_auths & MM_UBLOX_BEARER_ALLOWED_AUTH_AUTO)
             ublox_auth = 3;
-        else if (self->priv->allowed_auths & MM_UBLOX_BEARER_ALLOWED_AUTH_PAP)
-            ublox_auth = 1;
         else if (self->priv->allowed_auths & MM_UBLOX_BEARER_ALLOWED_AUTH_CHAP)
             ublox_auth = 2;
+        else if (self->priv->allowed_auths & MM_UBLOX_BEARER_ALLOWED_AUTH_PAP)
+            ublox_auth = 1;
         else if (self->priv->allowed_auths & MM_UBLOX_BEARER_ALLOWED_AUTH_NONE)
             ublox_auth = 0;
     } else if (allowed_auth & MM_BEARER_ALLOWED_AUTH_PAP) {
@@ -775,19 +775,20 @@ ugcntrd_ready (MMBaseModem  *modem,
     GError                 *error = NULL;
     guint64                 tx_bytes = 0;
     guint64                 rx_bytes = 0;
-    guint                   cid;
+    gint                    cid;
 
     self = MM_BROADBAND_BEARER_UBLOX (g_task_get_source_object (task));
 
     cid = mm_broadband_bearer_get_3gpp_cid (MM_BROADBAND_BEARER (self));
 
     response = mm_base_modem_at_command_finish (modem, res, &error);
-    if (response)
+    if (response) {
         mm_ublox_parse_ugcntrd_response_for_cid (response,
                                                  cid,
                                                  &tx_bytes, &rx_bytes,
                                                  NULL, NULL,
                                                  &error);
+    }
 
     if (error) {
         g_prefix_error (&error, "Couldn't load PDP context %u statistics: ", cid);
