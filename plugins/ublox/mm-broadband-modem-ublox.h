@@ -40,6 +40,9 @@ struct _MMBroadbandModemUbloxClass{
 
 GType mm_broadband_modem_ublox_get_type (void);
 
+gchar *mm_ublox_build_auth_string (GTask              *task,
+                                   MMBearerProperties *properties);
+
 MMBroadbandModemUblox *mm_broadband_modem_ublox_new (const gchar *device,
                                                      const gchar **drivers,
                                                      const gchar *plugin,
