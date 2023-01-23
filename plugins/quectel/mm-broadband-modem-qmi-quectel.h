@@ -30,6 +30,7 @@ typedef struct _MMBroadbandModemQmiQuectelClass MMBroadbandModemQmiQuectelClass;
 
 struct _MMBroadbandModemQmiQuectel {
     MMBroadbandModemQmi parent;
+    gint  initial_eps_bearer_cid;
 };
 
 struct _MMBroadbandModemQmiQuectelClass{
