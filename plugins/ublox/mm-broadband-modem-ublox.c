@@ -958,7 +958,23 @@ out:
 }
 
 /*****************************************************************************/
-/* Set initial EPS bearer settings */
+/* Common operation to load expected CID for the initial EPS bearer */
+
+static void
+load_initial_eps_bearer_cid (MMBroadbandModemUblox  *self)
+{
+    if (self->priv->initial_eps_bearer_cid < 0) {
+        mm_obj_dbg (self, "using default EPS bearer context id: 1");
+        self->priv->initial_eps_bearer_cid = 1;
+    } else {
+       /* value of initial_eps_bearer_cid can be diffenet in case of different modems
+          but in our case for modem LARA-R2 & TOBY-R2, cid=1 is used  */
+        mm_obj_dbg (self, "using pre-defined EPS bearer context id: %d", self->priv->initial_eps_bearer_cid);
+    }
+}
+
+/*****************************************************************************/
+/* Set initial EPS bearer Settings */
 
 typedef enum {
     SET_INITIAL_EPS_STEP_FIRST = 0,
@@ -1161,10 +1177,6 @@ set_initial_eps_step (GTask *task)
         const gchar        *ip_family_str;
         MMBearerIpFamily    ip_family;
 
-        /* For Ublox modems LARA-R2 & TOBY-R2 we are using default cid value = 1
-           This value can be different for other ublox modems (eg. TOBY-L2 or MPCI-L2) */
-        self->priv->initial_eps_bearer_cid = 1;
-
         ip_family = mm_bearer_properties_get_ip_type (ctx->properties);
         if (ip_family == MM_BEARER_IP_FAMILY_NONE || ip_family == MM_BEARER_IP_FAMILY_ANY)
             ip_family = MM_BEARER_IP_FAMILY_IPV4;
@@ -1239,6 +1251,9 @@ modem_3gpp_set_initial_eps_bearer_settings (MMIfaceModem3gpp    *self,
 
     task = g_task_new (self, NULL, callback, user_data);
 
+    /* The initial EPS bearer settings should have already been loaded */
+    g_assert (MM_BROADBAND_MODEM_UBLOX (self)->priv->initial_eps_bearer_cid >= 0);
+
     /* Setup context */
     ctx = g_slice_new0 (SetInitialEpsContext);
     ctx->properties = g_object_ref (properties);
@@ -1246,6 +1261,211 @@ modem_3gpp_set_initial_eps_bearer_settings (MMIfaceModem3gpp    *self,
     g_task_set_task_data (task, ctx, (GDestroyNotify) set_initial_eps_context_free);
 
     set_initial_eps_step (task);
+}
+
+/*****************************************************************************/
+/* Common initial EPS bearer info loading for both:
+ *   - runtime status
+ *   - configuration settings
+ */
+
+typedef enum {
+    COMMON_LOAD_INITIAL_EPS_STEP_FIRST = 0,
+    COMMON_LOAD_INITIAL_EPS_STEP_PROFILE,
+    COMMON_LOAD_INITIAL_EPS_STEP_APN,
+    COMMON_LOAD_INITIAL_EPS_STEP_AUTH,
+    COMMON_LOAD_INITIAL_EPS_STEP_LAST,
+} CommonLoadInitialEpsStep;
+
+typedef struct {
+    MMBearerProperties       *properties;
+    CommonLoadInitialEpsStep  step;
+} CommonLoadInitialEpsContext;
+
+static void
+common_load_initial_eps_context_free (CommonLoadInitialEpsContext *ctx)
+{
+    g_clear_object (&ctx->properties);
+    g_slice_free (CommonLoadInitialEpsContext, ctx);
+}
+
+static MMBearerProperties *
+common_load_initial_eps_bearer_finish (MMIfaceModem3gpp  *self,
+                                       GAsyncResult      *res,
+                                       GError           **error)
+{
+    return MM_BEARER_PROPERTIES (g_task_propagate_pointer (G_TASK (res), error));
+}
+
+static void common_load_initial_eps_step (GTask *task);
+
+static void
+common_load_initial_eps_auth_ready (MMBaseModem  *_self,
+                                    GAsyncResult *res,
+                                    GTask        *task)
+{
+    MMBroadbandModemUblox       *self = MM_BROADBAND_MODEM_UBLOX (_self);
+    const gchar                 *response;
+    CommonLoadInitialEpsContext *ctx;
+    g_autoptr(GError)            error = NULL;
+    MMBearerAllowedAuth          auth = MM_BEARER_ALLOWED_AUTH_UNKNOWN;
+    g_autofree gchar            *username = NULL;
+
+    ctx = (CommonLoadInitialEpsContext *) g_task_get_task_data (task);
+
+    response = mm_base_modem_at_command_finish (_self, res, &error);
+    if (!response)
+        mm_obj_dbg (self, "couldn't load context %d auth settings: %s",
+                    self->priv->initial_eps_bearer_cid, error->message);
+    else {
+        mm_bearer_properties_set_allowed_auth (ctx->properties, auth);
+        mm_bearer_properties_set_user (ctx->properties, username);
+    }
+
+    /* Go to next step */
+    ctx->step++;
+    common_load_initial_eps_step (task);
+}
+
+static void
+common_load_initial_eps_cgdcont_ready (MMBaseModem  *_self,
+                                       GAsyncResult *res,
+                                       GTask        *task)
+{
+    MMBroadbandModemUblox       *self = MM_BROADBAND_MODEM_UBLOX (_self);
+    const gchar                 *response;
+    CommonLoadInitialEpsContext *ctx;
+    g_autoptr(GError)            error = NULL;
+
+    ctx = (CommonLoadInitialEpsContext *) g_task_get_task_data (task);
+
+    /* errors aren't fatal */
+    response = mm_base_modem_at_command_finish (_self, res, &error);
+    if (!response)
+        mm_obj_dbg (self, "couldn't load context %d status: %s",
+                    self->priv->initial_eps_bearer_cid, error->message);
+    else {
+        GList *context_list;
+
+        context_list = mm_3gpp_parse_cgdcont_read_response (response, &error);
+        if (!context_list)
+            mm_obj_dbg (self, "couldn't parse CGDCONT response: %s", error->message);
+        else {
+            GList *l;
+
+            for (l = context_list; l; l = g_list_next (l)) {
+                MM3gppPdpContext *pdp = l->data;
+
+                if (pdp->cid == (guint) self->priv->initial_eps_bearer_cid) {
+                    mm_bearer_properties_set_ip_type (ctx->properties, pdp->pdp_type);
+                    mm_bearer_properties_set_apn (ctx->properties, pdp->apn ? pdp->apn : "");
+                    break;
+                }
+            }
+            if (!l)
+                mm_obj_dbg (self, "no status reported for context %d", self->priv->initial_eps_bearer_cid);
+            mm_3gpp_pdp_context_list_free (context_list);
+        }
+    }
+
+    /* Go to next step */
+    ctx->step++;
+    common_load_initial_eps_step (task);
+}
+
+static void
+common_load_initial_eps_step (GTask *task)
+{
+    MMBroadbandModemUblox   *self;
+    CommonLoadInitialEpsContext *ctx;
+
+    self = g_task_get_source_object (task);
+    ctx  = g_task_get_task_data (task);
+
+    switch (ctx->step) {
+    case COMMON_LOAD_INITIAL_EPS_STEP_FIRST:
+        ctx->step++;
+        /* fall through */
+
+    case COMMON_LOAD_INITIAL_EPS_STEP_PROFILE:
+        /* Initial EPS bearer CID initialization run once only */
+        if (G_UNLIKELY (self->priv->initial_eps_bearer_cid < 0)) {
+            load_initial_eps_bearer_cid (self);
+        }
+        ctx->step++;
+        /* fall through */
+
+    case COMMON_LOAD_INITIAL_EPS_STEP_APN:
+        mm_base_modem_at_command (
+            MM_BASE_MODEM (self),
+            "+CGDCONT?",
+            20,
+            FALSE,
+            (GAsyncReadyCallback)common_load_initial_eps_cgdcont_ready,
+            task);
+        return;
+
+    case COMMON_LOAD_INITIAL_EPS_STEP_AUTH: {
+            gchar  *auth_cmd = NULL;
+
+            auth_cmd = mm_ublox_build_auth_string(task, ctx->properties);
+
+            mm_base_modem_at_command (
+                MM_BASE_MODEM (self),
+                auth_cmd,
+                20,
+                FALSE,
+                (GAsyncReadyCallback)common_load_initial_eps_auth_ready,
+                task);
+            return;
+        }
+
+    case COMMON_LOAD_INITIAL_EPS_STEP_LAST:
+        g_task_return_pointer (task, g_steal_pointer (&ctx->properties), g_object_unref);
+        g_object_unref (task);
+        return;
+
+    default:
+        g_assert_not_reached ();
+    }
+}
+
+static void
+common_load_initial_eps_bearer (MMIfaceModem3gpp    *self,
+                                GAsyncReadyCallback  callback,
+                                gpointer             user_data)
+{
+    GTask                       *task;
+    CommonLoadInitialEpsContext *ctx;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    /* Setup context */
+    ctx = g_slice_new0 (CommonLoadInitialEpsContext);
+    ctx->properties = mm_bearer_properties_new ();
+    ctx->step = COMMON_LOAD_INITIAL_EPS_STEP_FIRST;
+    g_task_set_task_data (task, ctx, (GDestroyNotify) common_load_initial_eps_context_free);
+
+    common_load_initial_eps_step (task);
+}
+
+/*****************************************************************************/
+/* Initial EPS bearer runtime status loading */
+
+static MMBearerProperties *
+modem_3gpp_load_initial_eps_bearer_finish (MMIfaceModem3gpp  *self,
+                                           GAsyncResult      *res,
+                                           GError           **error)
+{
+    return common_load_initial_eps_bearer_finish (self, res, error);
+}
+
+static void
+modem_3gpp_load_initial_eps_bearer (MMIfaceModem3gpp    *self,
+                                    GAsyncReadyCallback  callback,
+                                    gpointer             user_data)
+{
+    common_load_initial_eps_bearer (self, callback, user_data);
 }
 
 /*****************************************************************************/
@@ -2198,6 +2418,7 @@ mm_broadband_modem_ublox_init (MMBroadbandModemUblox *self)
     self->priv = G_TYPE_INSTANCE_GET_PRIVATE (self,
                                               MM_TYPE_BROADBAND_MODEM_UBLOX,
                                               MMBroadbandModemUbloxPrivate);
+    self->priv->initial_eps_bearer_cid = -1;
     self->priv->profile = MM_UBLOX_USB_PROFILE_UNKNOWN;
     self->priv->mode = MM_UBLOX_NETWORKING_MODE_UNKNOWN;
     self->priv->any_allowed = MM_MODEM_MODE_NONE;
@@ -2248,6 +2469,9 @@ iface_modem_3gpp_init (MMIfaceModem3gpp *iface)
 {
     iface_modem_3gpp_parent = g_type_interface_peek_parent (iface);
 
+    /* Additional steps */
+    iface->load_initial_eps_bearer = modem_3gpp_load_initial_eps_bearer;
+    iface->load_initial_eps_bearer_finish = modem_3gpp_load_initial_eps_bearer_finish;
     iface->set_initial_eps_bearer_settings = modem_3gpp_set_initial_eps_bearer_settings;
     iface->set_initial_eps_bearer_settings_finish = modem_3gpp_set_initial_eps_bearer_settings_finish;
 }
